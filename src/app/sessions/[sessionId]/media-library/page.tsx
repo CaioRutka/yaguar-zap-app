@@ -9,8 +9,10 @@ import {
 } from '@/hooks/use-media-library';
 import { getMediaDownloadUrl } from '@/lib/api/client';
 import { formatTimestamp } from '@/lib/utils';
+import { useTenant } from '@/lib/tenant-context';
 import { AppPageShell } from '@/components/app-page-shell';
 import { PageHeader } from '@/components/page-header';
+import { MediaThumbnail } from '@/components/media-thumbnail';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -45,9 +47,27 @@ export default function MediaLibraryPage() {
   const [uploadName, setUploadName] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const { tenantId } = useTenant();
   const { data: items, isLoading } = useMediaLibrary(sessionId, activeType || undefined);
   const uploadItem = useUploadMediaItem(sessionId);
   const deleteItem = useDeleteMediaItem(sessionId);
+
+  const handleDownload = async (mediaId: string, fileName: string) => {
+    try {
+      const url = getMediaDownloadUrl(sessionId, mediaId);
+      const res = await fetch(url, { headers: { 'X-Tenant-Id': tenantId } });
+      if (!res.ok) throw new Error('download failed');
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(blobUrl);
+    } catch {
+      console.error('Failed to download media item');
+    }
+  };
 
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -133,10 +153,20 @@ export default function MediaLibraryPage() {
               style={{ animationDelay: `${i * 40}ms` }}
             >
               <div className="flex items-start gap-3">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 ring-1 ring-primary/15">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-primary">
-                    <path d={TYPE_ICONS[item.type] || TYPE_ICONS.document} />
-                  </svg>
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-primary/10 ring-1 ring-primary/15">
+                  {item.type === 'image' ? (
+                    <MediaThumbnail
+                      sessionId={sessionId}
+                      mediaId={item._id}
+                      mediaUrl={item.mediaUrl}
+                      alt={item.name}
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-primary">
+                      <path d={TYPE_ICONS[item.type] || TYPE_ICONS.document} />
+                    </svg>
+                  )}
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-semibold">{item.name}</p>
@@ -150,14 +180,13 @@ export default function MediaLibraryPage() {
                 </div>
               </div>
               <div className="mt-4 flex items-center gap-3 border-t border-border/50 pt-3">
-                <a
-                  href={getMediaDownloadUrl(sessionId, item._id)}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
+                  onClick={() => void handleDownload(item._id, item.name)}
                   className="text-xs font-medium text-primary transition-colors hover:underline cursor-pointer"
                 >
                   Baixar
-                </a>
+                </button>
                 <button
                   type="button"
                   onClick={() => deleteItem.mutate(item._id)}

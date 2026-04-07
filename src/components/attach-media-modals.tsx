@@ -5,6 +5,7 @@ import { Dialog } from '@/components/ui/dialog';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Button } from '@/components/ui/button';
 import { useMediaLibrary } from '@/hooks/use-media-library';
+import { MediaThumbnail } from '@/components/media-thumbnail';
 import { formatTimestamp } from '@/lib/utils';
 import type { MediaItemDto } from '@/lib/types/whatsapp';
 
@@ -236,8 +237,18 @@ export function GalleryPickerModal({
                     onClick={() => void onPick(item)}
                     className="flex w-full items-center gap-3 rounded-xl border border-border/50 bg-background/30 p-3 text-left transition-colors hover:border-primary/40 hover:bg-primary/6 disabled:opacity-50"
                   >
-                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-border/40 bg-muted/30 text-muted-foreground">
-                      {TYPE_ICONS[item.type]}
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border/40 bg-muted/30 text-muted-foreground">
+                      {item.type === 'image' ? (
+                        <MediaThumbnail
+                          sessionId={sessionId}
+                          mediaId={item._id}
+                          mediaUrl={item.mediaUrl}
+                          alt={item.name}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        TYPE_ICONS[item.type]
+                      )}
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-foreground">{item.name}</span>

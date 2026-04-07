@@ -69,6 +69,7 @@ export type MediaItemDto = {
   type: 'image' | 'audio' | 'video' | 'document';
   mimetype: string;
   size: number;
+  mediaUrl?: string;
   tags: string[];
   createdAt: string;
   updatedAt: string;
@@ -83,6 +84,7 @@ export type BroadcastDto = {
   sessionId: string;
   name: string;
   baseMessage: string;
+  variableMessage?: string;
   useAiVariation: boolean;
   deliveryChannel: BroadcastDeliveryChannel;
   status: BroadcastStatus;

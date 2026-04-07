@@ -23,6 +23,7 @@ export function useCreateBroadcast(sessionId: string) {
     mutationFn: (body: {
       name: string;
       baseMessage: string;
+      variableMessage?: string;
       useAiVariation?: boolean;
       deliveryChannel?: 'baileys_web' | 'cloud_api';
       recipientLimit?: number;

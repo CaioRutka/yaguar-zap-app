@@ -44,6 +44,7 @@ export default function BroadcastPage() {
   const [actionError, setActionError] = useState('');
   const [name, setName] = useState('');
   const [baseMessage, setBaseMessage] = useState('');
+  const [variableMessage, setVariableMessage] = useState('');
   const [useAi, setUseAi] = useState(true);
   const [deliveryChannel, setDeliveryChannel] = useState<'baileys_web' | 'cloud_api'>('baileys_web');
   const [recipientLimit, setRecipientLimit] = useState('500');
@@ -66,6 +67,7 @@ export default function BroadcastPage() {
 
   const handleCreate = () => {
     if (!name.trim() || !baseMessage.trim()) return;
+    const hasVariable = variableMessage.trim().length > 0;
     setFormError('');
     let delayPatternMs: number[] | undefined;
     try {
@@ -84,7 +86,8 @@ export default function BroadcastPage() {
       {
         name: name.trim(),
         baseMessage: baseMessage.trim(),
-        useAiVariation: useAi,
+        variableMessage: hasVariable ? variableMessage.trim() : undefined,
+        useAiVariation: hasVariable ? useAi : false,
         deliveryChannel,
         recipientLimit: Math.min(5000, Math.max(1, Number(recipientLimit) || 500)),
         filters: {
@@ -113,6 +116,7 @@ export default function BroadcastPage() {
           setShowForm(false);
           setName('');
           setBaseMessage('');
+          setVariableMessage('');
           setTagsStr('');
           setSearch('');
           setCreatedAtFrom('');
@@ -182,27 +186,58 @@ export default function BroadcastPage() {
 
             <div className="space-y-2">
               <label htmlFor="bc-msg" className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Mensagem base
+                Mensagem fixa
               </label>
+              <p className="text-[10px] text-muted-foreground -mt-1">Essa parte é enviada exatamente como digitada — a IA não altera.</p>
               <textarea
                 id="bc-msg"
                 value={baseMessage}
                 onChange={(e) => setBaseMessage(e.target.value)}
-                placeholder="Texto enviado aos destinatários (pode ser variado pela IA sem alterar números quando GEMINI_API_KEY está configurada no servidor)"
+                placeholder="Ex: Olá! Temos condições especiais para você:\n\nApto 3Q no Centro — R$ 450.000\nFinanciamento em até 360x"
                 rows={4}
                 className="w-full resize-none rounded-xl border border-input bg-card/80 px-3 py-2.5 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             </div>
 
-            <label className="flex cursor-pointer items-center gap-2.5 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5 transition-colors hover:bg-muted/35">
-              <input
-                type="checkbox"
-                checked={useAi}
-                onChange={(e) => setUseAi(e.target.checked)}
-                className="h-4 w-4 rounded border-input text-primary focus:ring-primary"
+            <div className="space-y-2">
+              <label htmlFor="bc-var" className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Mensagem variável (IA)
+              </label>
+              <p className="text-[10px] text-muted-foreground -mt-1">Parte que a IA vai reescrever de forma diferente para cada destinatário (anti-bloqueio). Deixe vazio se não quiser variação.</p>
+              <textarea
+                id="bc-var"
+                value={variableMessage}
+                onChange={(e) => setVariableMessage(e.target.value)}
+                placeholder="Ex: Quer agendar uma visita? Temos horários disponíveis essa semana. Responda aqui que entro em contato!"
+                rows={3}
+                className="w-full resize-none rounded-xl border border-input bg-card/80 px-3 py-2.5 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
-              <span className="text-xs font-medium">Variar mensagem com IA (anti-bloqueio; preserva valores com Gemini)</span>
-            </label>
+            </div>
+
+            {variableMessage.trim() && (
+              <label className="flex cursor-pointer items-center gap-2.5 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5 transition-colors hover:bg-muted/35">
+                <input
+                  type="checkbox"
+                  checked={useAi}
+                  onChange={(e) => setUseAi(e.target.checked)}
+                  className="h-4 w-4 rounded border-input text-primary focus:ring-primary"
+                />
+                <span className="text-xs font-medium">Variar mensagem com IA (anti-bloqueio; preserva valores com Gemini)</span>
+              </label>
+            )}
+
+            {baseMessage.trim() && (
+              <div className="rounded-xl border border-border/40 bg-muted/10 px-4 py-3 space-y-1">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Pré-visualização da mensagem</p>
+                <p className="whitespace-pre-wrap text-xs text-foreground/80 leading-relaxed">
+                  {baseMessage.trim()}
+                  {variableMessage.trim() ? '\n\n' + variableMessage.trim() : ''}
+                </p>
+                {variableMessage.trim() && useAi && (
+                  <p className="text-[9px] text-primary/70 mt-1.5">↑ A parte variável será reescrita pela IA a cada envio</p>
+                )}
+              </div>
+            )}
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
@@ -371,6 +406,7 @@ export default function BroadcastPage() {
               <Button
                 onClick={handleCreate}
                 disabled={!name.trim() || !baseMessage.trim() || createBroadcast.isPending}
+                title={!name.trim() || !baseMessage.trim() ? 'Preencha o nome e a mensagem fixa' : undefined}
                 className="gap-2"
               >
                 {createBroadcast.isPending ? <Spinner className="h-4 w-4" /> : 'Criar campanha'}
@@ -422,7 +458,10 @@ export default function BroadcastPage() {
                     )}
                     {b.useAiVariation && <Badge variant="info" className="text-[9px]">IA</Badge>}
                   </div>
-                  <p className="mb-3 line-clamp-2 text-xs leading-relaxed text-muted-foreground">{b.baseMessage}</p>
+                  <p className="mb-3 line-clamp-3 text-xs leading-relaxed text-muted-foreground">
+                    {b.baseMessage}
+                    {b.variableMessage ? '\n\n' + b.variableMessage : ''}
+                  </p>
                   <div className="flex flex-wrap gap-1.5 text-[9px] text-muted-foreground">
                     {b.filters.tags && b.filters.tags.length > 0 && (
                       <span className="rounded bg-muted/80 px-1.5 py-0.5">tags: {b.filters.tags.join(', ')}</span>

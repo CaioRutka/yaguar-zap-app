@@ -77,6 +77,13 @@ export function MessageThread({ sessionId, activeJid, disabled }: Props) {
   const [showQuickAudios, setShowQuickAudios] = useState(false);
   const [gallerySending, setGallerySending] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
+  
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingIntervalRef = useRef<number | null>(null);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const actionsRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -127,7 +134,13 @@ export function MessageThread({ sessionId, activeJid, disabled }: Props) {
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+         mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
+      }
+    };
   }, []);
 
   const handleSend = (e: React.FormEvent) => {
@@ -228,6 +241,85 @@ export function MessageThread({ sessionId, activeJid, disabled }: Props) {
   const handleEmojiSelect = (emoji: string) => {
     setText((prev) => prev + emoji);
     setShowEmoji(false);
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      let options = { mimeType: 'audio/webm' };
+      if (!MediaRecorder.isTypeSupported('audio/webm')) {
+        options = { mimeType: 'audio/mp4' };
+      }
+      
+      const recorder = new MediaRecorder(stream, options);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.start(100);
+      setIsRecording(true);
+      setRecordingDuration(0);
+
+      recordingIntervalRef.current = window.setInterval(() => {
+        setRecordingDuration((prev) => prev + 1);
+      }, 1000);
+    } catch (err) {
+      console.error('Error accessing microphone:', err);
+      setError('Permissão de microfone negada. Verifique as configurações do navegador.');
+    }
+  };
+
+  const stopRecordingTracks = () => {
+    if (mediaRecorderRef.current) {
+      if (mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+      mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
+    }
+    if (recordingIntervalRef.current) {
+      clearInterval(recordingIntervalRef.current);
+      recordingIntervalRef.current = null;
+    }
+    setIsRecording(false);
+  };
+
+  const cancelRecording = () => {
+    stopRecordingTracks();
+    audioChunksRef.current = [];
+    setRecordingDuration(0);
+  };
+
+  const sendRecording = () => {
+    stopRecordingTracks();
+    setTimeout(() => {
+      if (!activeJid || audioChunksRef.current.length === 0) return;
+      const type = mediaRecorderRef.current?.mimeType || 'audio/webm';
+      const audioBlob = new Blob(audioChunksRef.current, { type });
+      const audioFile = new File([audioBlob], `audio-${Date.now()}.webm`, { type });
+
+      setError('');
+      sendMedia.mutate(
+        { remoteJid: activeJid, file: audioFile, ptt: true },
+        {
+          onError: (err) => {
+            setError(err instanceof ApiError ? err.message : 'Falha ao enviar áudio');
+          },
+        }
+      );
+      audioChunksRef.current = [];
+      setRecordingDuration(0);
+    }, 200); // Dar tempo ao MediaRecorder para gerar o último ondataavailable
+  };
+
+  const formatDuration = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
   const handleQuickFunnel = (stage: string) => {
@@ -759,88 +851,148 @@ export function MessageThread({ sessionId, activeJid, disabled }: Props) {
             <EmojiPicker onSelect={handleEmojiSelect} />
           </div>
         )}
-        <form onSubmit={handleSend} className="flex shrink-0 items-center gap-2 border-t border-border/60 bg-card/95 p-3 backdrop-blur-md">
-          <button
-            type="button"
-            onClick={() => setShowEmoji((v) => !v)}
-            className={cn(
-              'flex items-center justify-center h-9 w-9 rounded-xl transition-colors shrink-0 cursor-pointer',
-              showEmoji ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
-            )}
-            title="Emojis"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <path d="M8 14s1.5 2 4 2 4-2 4-2" />
-              <line x1="9" y1="9" x2="9.01" y2="9" />
-              <line x1="15" y1="9" x2="15.01" y2="9" />
-            </svg>
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            className="hidden"
-            accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip"
-            onChange={handleFileChange}
-          />
-          <button
-            type="button"
-            onClick={() => {
-              setShowEmoji(false);
-              setShowQuickAudios(true);
-            }}
-            className="flex items-center justify-center h-9 w-9 rounded-xl transition-colors shrink-0 cursor-pointer text-muted-foreground hover:bg-muted hover:text-foreground"
-            title="Áudios prontos da galeria"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowAttachSource(true)}
-            className="flex items-center justify-center h-9 w-9 rounded-xl transition-colors shrink-0 cursor-pointer text-muted-foreground hover:bg-muted hover:text-foreground"
-            title="Enviar mídia"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowSchedule(true)}
-            className="flex items-center justify-center h-9 w-9 rounded-xl transition-colors shrink-0 cursor-pointer text-muted-foreground hover:bg-muted hover:text-foreground"
-            title="Agendar mensagem"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-            </svg>
-          </button>
-          <Input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onFocus={() => setShowEmoji(false)}
-            placeholder={disabled ? 'Sessão não conectada' : 'Digite uma mensagem...'}
-            disabled={disabled || send.isPending}
-            className="flex-1 rounded-xl"
-          />
-          <Button
-            type="submit"
-            size="icon"
-            disabled={disabled || send.isPending || !text.trim()}
-            className="rounded-xl shrink-0"
-          >
-            {send.isPending ? (
-              <Spinner className="h-4 w-4" />
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
-              </svg>
-            )}
-          </Button>
-          {error && <p className="text-xs text-destructive ml-1 animate-slide-up">{error}</p>}
+        <form onSubmit={handleSend} className="relative flex shrink-0 items-center gap-2 border-t border-border/60 bg-card/95 p-3 backdrop-blur-md min-h-[60px]">
+          {isRecording ? (
+            <div className="flex flex-1 items-center justify-between gap-3 px-2 animate-slide-up">
+              <button
+                type="button"
+                onClick={cancelRecording}
+                className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl text-destructive hover:bg-destructive/10 transition-colors"
+                title="Cancelar gravação"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2M10 11v6M14 11v6" />
+                </svg>
+              </button>
+              
+              <div className="flex items-center gap-2 text-destructive">
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-destructive opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-destructive"></span>
+                </span>
+                <span className="font-mono text-[13px] tracking-wider">{formatDuration(recordingDuration)}</span>
+              </div>
+              
+              <Button
+                type="button"
+                size="icon"
+                onClick={sendRecording}
+                disabled={sendMedia.isPending}
+                className="rounded-xl shrink-0 shadow-sm"
+                title="Enviar Áudio"
+              >
+                {sendMedia.isPending ? (
+                  <Spinner className="h-4 w-4" />
+                ) : (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
+                  </svg>
+                )}
+              </Button>
+            </div>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowEmoji((v) => !v)}
+                className={cn(
+                  'flex items-center justify-center h-9 w-9 rounded-xl transition-colors shrink-0 cursor-pointer',
+                  showEmoji ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                )}
+                title="Emojis"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+                  <line x1="9" y1="9" x2="9.01" y2="9" />
+                  <line x1="15" y1="9" x2="15.01" y2="9" />
+                </svg>
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip"
+                onChange={handleFileChange}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  setShowEmoji(false);
+                  setShowQuickAudios(true);
+                }}
+                className="flex items-center justify-center h-9 w-9 rounded-xl transition-colors shrink-0 cursor-pointer text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Áudios prontos da galeria"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAttachSource(true)}
+                className="flex items-center justify-center h-9 w-9 rounded-xl transition-colors shrink-0 cursor-pointer text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Enviar mídia"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowSchedule(true)}
+                className="flex items-center justify-center h-9 w-9 rounded-xl transition-colors shrink-0 cursor-pointer text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Agendar mensagem"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+              </button>
+              <Input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onFocus={() => setShowEmoji(false)}
+                placeholder={disabled ? 'Sessão não conectada' : 'Digite uma mensagem...'}
+                disabled={disabled || send.isPending}
+                className="flex-1 rounded-xl"
+              />
+              {text.trim() ? (
+                <Button
+                  type="submit"
+                  size="icon"
+                  disabled={disabled || send.isPending}
+                  className="rounded-xl shrink-0"
+                >
+                  {send.isPending ? (
+                    <Spinner className="h-4 w-4" />
+                  ) : (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
+                    </svg>
+                  )}
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="icon"
+                  disabled={disabled}
+                  onClick={startRecording}
+                  className="rounded-xl shrink-0 bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground shadow-none"
+                  title="Gravar Áudio"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                    <line x1="12" y1="19" x2="12" y2="23"/>
+                    <line x1="8" y1="23" x2="16" y2="23"/>
+                  </svg>
+                </Button>
+              )}
+            </>
+          )}
+          {error && <p className="absolute bottom-full right-4 mb-2 -translate-y-2 text-xs font-medium text-destructive px-3 py-1.5 bg-destructive/10 rounded-lg backdrop-blur-sm shadow-sm animate-slide-up ring-1 ring-destructive/20">{error}</p>}
         </form>
         {showSchedule && activeJid && (
           <ScheduleMessageDialog
