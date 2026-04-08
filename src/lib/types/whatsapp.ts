@@ -60,6 +60,12 @@ export type WaScheduledMessageDto = {
   cancelledAt?: string;
   createdAt: string;
   updatedAt: string;
+  hasMedia: boolean;
+  mediaType?: 'image' | 'audio' | 'video' | 'document';
+  mediaMimetype?: string;
+  mediaFilename?: string;
+  caption?: string;
+  audioPtt?: boolean;
 };
 
 export type MediaItemDto = {
@@ -79,13 +85,60 @@ export type BroadcastStatus = 'draft' | 'running' | 'paused' | 'completed' | 'ca
 
 export type BroadcastDeliveryChannel = 'baileys_web' | 'cloud_api';
 
+export type BroadcastMediaType = 'image' | 'audio' | 'video' | 'document';
+
+export type BroadcastBlockDto = {
+  order: number;
+  type: 'text' | 'media';
+  content?: string;
+  mode?: 'fixed' | 'variable';
+  mediaType?: BroadcastMediaType;
+  mediaMimetype?: string;
+  mediaFilename?: string;
+  caption?: string;
+  audioPtt?: boolean;
+  hasMedia: boolean;
+};
+
+/** Payload de criação (ordem = índice no array). */
+export type CreateBroadcastTextBlock = {
+  type: 'text';
+  content: string;
+  mode: 'fixed' | 'variable';
+};
+
+export type CreateBroadcastMediaBlock = {
+  type: 'media';
+  mediaType: BroadcastMediaType;
+  file: File;
+  caption?: string;
+  audioPtt?: boolean;
+};
+
+export type CreateBroadcastBlock = CreateBroadcastTextBlock | CreateBroadcastMediaBlock;
+
+/** Edição: mídia pode manter arquivo já salvo no servidor. */
+export type UpdateBroadcastMediaKeep = {
+  type: 'media';
+  mediaType: BroadcastMediaType;
+  keepExisting: true;
+  caption?: string;
+  audioPtt?: boolean;
+};
+
+export type UpdateBroadcastMediaUpload = CreateBroadcastMediaBlock & { keepExisting?: false };
+
+export type UpdateBroadcastBlock = CreateBroadcastTextBlock | UpdateBroadcastMediaUpload | UpdateBroadcastMediaKeep;
+
 export type BroadcastDto = {
   _id: string;
   sessionId: string;
   name: string;
-  baseMessage: string;
+  blocks: BroadcastBlockDto[];
+  /** Campanhas antigas (Mongo sem `blocks`) — também refletido em `blocks` sintéticos. */
+  baseMessage?: string;
   variableMessage?: string;
-  useAiVariation: boolean;
+  useAiVariation?: boolean;
   deliveryChannel: BroadcastDeliveryChannel;
   status: BroadcastStatus;
   filters: {
@@ -116,6 +169,8 @@ export type BroadcastDto = {
   updatedAt: string;
   startedAt?: string;
   completedAt?: string;
+  /** Erro de exemplo quando há falhas (vem do backend). */
+  sampleRecipientError?: string;
 };
 
 export type MeetingStatus = 'scheduled' | 'completed' | 'cancelled' | 'no_show';

@@ -163,8 +163,9 @@ export function MessageThread({ sessionId, activeJid, disabled }: Props) {
     const file = e.target.files?.[0];
     if (!file || !activeJid) return;
     setError('');
+    const voiceNote = file.type.startsWith('audio/');
     sendMedia.mutate(
-      { remoteJid: activeJid, file },
+      { remoteJid: activeJid, file, ...(voiceNote ? { mediaType: 'audio' as const, ptt: true } : {}) },
       {
         onError: (err) => {
           setError(err instanceof ApiError ? err.message : 'Falha ao enviar mídia');
@@ -188,6 +189,7 @@ export function MessageThread({ sessionId, activeJid, disabled }: Props) {
         remoteJid: activeJid,
         file,
         mediaType: item.type,
+        ...(item.type === 'audio' ? { ptt: true } : {}),
       });
       setShowGalleryPicker(false);
     } catch (err) {
@@ -207,7 +209,7 @@ export function MessageThread({ sessionId, activeJid, disabled }: Props) {
         remoteJid: activeJid,
         file,
         mediaType: 'audio',
-        ptt: false,
+        ptt: true,
       });
       setShowQuickAudios(false);
     } catch (err) {

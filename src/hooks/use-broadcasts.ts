@@ -3,6 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '@/lib/api/client';
 import { useTenant } from '@/lib/tenant-context';
+import type { CreateBroadcastBlock, UpdateBroadcastBlock } from '@/lib/types/whatsapp';
 
 export function useBroadcasts(sessionId: string) {
   const { tenantId } = useTenant();
@@ -22,14 +23,34 @@ export function useCreateBroadcast(sessionId: string) {
   return useMutation({
     mutationFn: (body: {
       name: string;
-      baseMessage: string;
-      variableMessage?: string;
-      useAiVariation?: boolean;
+      blocks: CreateBroadcastBlock[];
       deliveryChannel?: 'baileys_web' | 'cloud_api';
       recipientLimit?: number;
       filters?: Record<string, unknown>;
       cadence?: Record<string, unknown>;
     }) => api.createBroadcast(tenantId, sessionId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['broadcasts', tenantId, sessionId] });
+    },
+  });
+}
+
+export function useUpdateBroadcast(sessionId: string) {
+  const { tenantId } = useTenant();
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: (args: {
+      broadcastId: string;
+      body: {
+        name: string;
+        blocks: UpdateBroadcastBlock[];
+        deliveryChannel?: 'baileys_web' | 'cloud_api';
+        recipientLimit?: number;
+        filters?: Record<string, unknown>;
+        cadence?: Record<string, unknown>;
+      };
+    }) => api.updateBroadcast(tenantId, sessionId, args.broadcastId, args.body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['broadcasts', tenantId, sessionId] });
     },

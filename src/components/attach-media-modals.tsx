@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import { Dialog } from '@/components/ui/dialog';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Button } from '@/components/ui/button';
@@ -46,7 +46,7 @@ const TYPE_ICONS: Record<MediaKind, ReactNode> = {
   ),
 };
 
-type GalleryFilterTab = 'all' | MediaKind;
+export type GalleryFilterTab = 'all' | MediaKind;
 
 const GALLERY_TYPE_TABS: { value: GalleryFilterTab; label: string }[] = [
   { value: 'all', label: 'Todos' },
@@ -159,6 +159,10 @@ type GalleryPickerModalProps = {
   sessionId: string;
   onPick: (item: MediaItemDto) => Promise<void>;
   isSending: boolean;
+  /** Filtro inicial ao abrir (ex.: tipo do bloco de campanha). */
+  initialTypeFilter?: GalleryFilterTab;
+  /** Se true, só lista esse tipo — sem trocar aba. */
+  lockTypeFilter?: boolean;
 };
 
 export function GalleryPickerModal({
@@ -167,11 +171,21 @@ export function GalleryPickerModal({
   sessionId,
   onPick,
   isSending,
+  initialTypeFilter = 'all',
+  lockTypeFilter = false,
 }: GalleryPickerModalProps) {
-  const [typeFilter, setTypeFilter] = useState<GalleryFilterTab>('all');
+  const [typeFilter, setTypeFilter] = useState<GalleryFilterTab>(initialTypeFilter);
+
+  useEffect(() => {
+    if (open) {
+      setTypeFilter(initialTypeFilter);
+    }
+  }, [open, initialTypeFilter]);
+
+  const effectiveFilter = lockTypeFilter ? initialTypeFilter : typeFilter;
   const { data, isLoading, isError, error } = useMediaLibrary(
     sessionId,
-    typeFilter === 'all' ? undefined : typeFilter,
+    effectiveFilter === 'all' ? undefined : effectiveFilter,
   );
 
   const close = () => onOpenChange(false);
@@ -189,7 +203,7 @@ export function GalleryPickerModal({
             <div className="min-w-0">
               <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-primary/90">Galeria da sessão</p>
               <h2 className="text-lg font-semibold tracking-tight text-foreground">Escolher arquivo</h2>
-              <p className="text-sm text-muted-foreground">Toque em um item para enviar no chat atual.</p>
+              <p className="text-sm text-muted-foreground">Toque em um item para selecionar.</p>
             </div>
             <button
               type="button"
@@ -202,13 +216,15 @@ export function GalleryPickerModal({
               </svg>
             </button>
           </div>
-          <SegmentedControl<GalleryFilterTab>
-            value={typeFilter}
-            onChange={setTypeFilter}
-            options={GALLERY_TYPE_TABS}
-            className="w-full"
-            size="md"
-          />
+          {!lockTypeFilter && (
+            <SegmentedControl<GalleryFilterTab>
+              value={typeFilter}
+              onChange={setTypeFilter}
+              options={GALLERY_TYPE_TABS}
+              className="w-full"
+              size="md"
+            />
+          )}
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {isLoading && (

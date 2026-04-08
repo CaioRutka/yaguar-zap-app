@@ -1,5 +1,7 @@
 import type {
   BroadcastDto,
+  CreateBroadcastBlock,
+  UpdateBroadcastBlock,
   HealthResponse,
   MediaItemDto,
   MeetingDto,
@@ -27,6 +29,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   if (!res.ok) throw await ApiError.fromResponse(res);
   if (res.status === 204) return undefined as T;
+  return res.json() as Promise<T>;
+}
+
+async function fetchFormData<T>(
+  path: string,
+  tenantId: string,
+  formData: FormData,
+  method: 'POST' | 'PATCH' = 'POST',
+): Promise<T> {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method,
+    headers: { 'X-Tenant-Id': tenantId },
+    body: formData,
+  });
+  if (!res.ok) throw await ApiError.fromResponse(res);
   return res.json() as Promise<T>;
 }
 
@@ -418,20 +435,62 @@ function scheduledPath(sessionId: string) {
   return `/api/v1/whatsapp/sessions/${encodeURIComponent(sessionId)}/scheduled-messages`;
 }
 
+export type CreateScheduledMessageBody =
+  | {
+      remoteJid: string;
+      text: string;
+      scheduledAt: string;
+      cancelConditions?: string[];
+    }
+  | {
+      remoteJid: string;
+      scheduledAt: string;
+      cancelConditions?: string[];
+      mediaType: 'image' | 'audio' | 'video' | 'document';
+      file: File;
+      text?: string;
+      caption?: string;
+      audioPtt?: boolean;
+      mediaFilename?: string;
+    };
+
 export function createScheduledMessage(
   tenantId: string,
   sessionId: string,
-  body: {
-    remoteJid: string;
-    text: string;
-    scheduledAt: string;
-    cancelConditions?: string[];
-  },
+  body: CreateScheduledMessageBody,
 ) {
+  if ('file' in body && body.file) {
+    const fd = new FormData();
+    fd.append(
+      'data',
+      JSON.stringify({
+        remoteJid: body.remoteJid,
+        text: body.text ?? '',
+        scheduledAt: body.scheduledAt,
+        cancelConditions: body.cancelConditions ?? [],
+        mediaType: body.mediaType,
+        caption: body.caption,
+        audioPtt: body.audioPtt,
+        mediaFilename: body.mediaFilename ?? body.file.name,
+      }),
+    );
+    fd.append('file', body.file);
+    return fetchFormData<{ scheduledMessage: WaScheduledMessageDto }>(
+      scheduledPath(sessionId),
+      tenantId,
+      fd,
+      'POST',
+    );
+  }
   return request<{ scheduledMessage: WaScheduledMessageDto }>(scheduledPath(sessionId), {
     method: 'POST',
     headers: withTenant(tenantId),
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      remoteJid: body.remoteJid,
+      text: body.text,
+      scheduledAt: body.scheduledAt,
+      cancelConditions: body.cancelConditions ?? [],
+    }),
   });
 }
 
@@ -463,7 +522,7 @@ export function updateScheduledMessage(
   tenantId: string,
   sessionId: string,
   scheduledId: string,
-  body: { text?: string; scheduledAt?: string },
+  body: { text?: string; scheduledAt?: string; caption?: string },
 ) {
   return request<{ scheduledMessage: WaScheduledMessageDto }>(
     `${scheduledPath(sessionId)}/${encodeURIComponent(scheduledId)}`,
@@ -486,20 +545,112 @@ export function createBroadcast(
   sessionId: string,
   body: {
     name: string;
-    baseMessage: string;
-    variableMessage?: string;
-    useAiVariation?: boolean;
+    blocks: CreateBroadcastBlock[];
     deliveryChannel?: 'baileys_web' | 'cloud_api';
     recipientLimit?: number;
     filters?: Record<string, unknown>;
     cadence?: Record<string, unknown>;
   },
 ) {
-  return request<{ broadcast: BroadcastDto }>(broadcastPath(sessionId), {
-    method: 'POST',
-    headers: withTenant(tenantId),
-    body: JSON.stringify(body),
+  const jsonBlocks: Array<Record<string, unknown>> = [];
+  const fd = new FormData();
+  let mediaSlot = 0;
+
+  body.blocks.forEach((b, index) => {
+    const order = index;
+    if (b.type === 'text') {
+      jsonBlocks.push({ order, type: 'text', content: b.content, mode: b.mode });
+    } else {
+      jsonBlocks.push({
+        order,
+        type: 'media',
+        mediaType: b.mediaType,
+        caption: b.caption,
+        audioPtt: b.audioPtt,
+        mediaFilename: b.file.name,
+      });
+      fd.append(`media_${mediaSlot}`, b.file);
+      mediaSlot += 1;
+    }
   });
+
+  fd.append(
+    'data',
+    JSON.stringify({
+      name: body.name,
+      blocks: jsonBlocks,
+      deliveryChannel: body.deliveryChannel ?? 'baileys_web',
+      recipientLimit: body.recipientLimit,
+      filters: body.filters ?? {},
+      cadence: body.cadence ?? {},
+    }),
+  );
+
+  return fetchFormData<{ broadcast: BroadcastDto }>(broadcastPath(sessionId), tenantId, fd);
+}
+
+export function updateBroadcast(
+  tenantId: string,
+  sessionId: string,
+  broadcastId: string,
+  body: {
+    name: string;
+    blocks: UpdateBroadcastBlock[];
+    deliveryChannel?: 'baileys_web' | 'cloud_api';
+    recipientLimit?: number;
+    filters?: Record<string, unknown>;
+    cadence?: Record<string, unknown>;
+  },
+) {
+  const jsonBlocks: Array<Record<string, unknown>> = [];
+  const fd = new FormData();
+  let mediaSlot = 0;
+
+  body.blocks.forEach((b, index) => {
+    const order = index;
+    if (b.type === 'text') {
+      jsonBlocks.push({ order, type: 'text', content: b.content, mode: b.mode });
+    } else if (b.keepExisting) {
+      jsonBlocks.push({
+        order,
+        type: 'media',
+        mediaType: b.mediaType,
+        caption: b.caption,
+        audioPtt: b.audioPtt,
+        keepExisting: true,
+      });
+    } else {
+      jsonBlocks.push({
+        order,
+        type: 'media',
+        mediaType: b.mediaType,
+        caption: b.caption,
+        audioPtt: b.audioPtt,
+        mediaFilename: b.file.name,
+      });
+      fd.append(`media_${mediaSlot}`, b.file);
+      mediaSlot += 1;
+    }
+  });
+
+  fd.append(
+    'data',
+    JSON.stringify({
+      name: body.name,
+      blocks: jsonBlocks,
+      deliveryChannel: body.deliveryChannel ?? 'baileys_web',
+      recipientLimit: body.recipientLimit,
+      filters: body.filters ?? {},
+      cadence: body.cadence ?? {},
+    }),
+  );
+
+  return fetchFormData<{ broadcast: BroadcastDto }>(
+    `${broadcastPath(sessionId)}/${encodeURIComponent(broadcastId)}`,
+    tenantId,
+    fd,
+    'PATCH',
+  );
 }
 
 export function listBroadcasts(

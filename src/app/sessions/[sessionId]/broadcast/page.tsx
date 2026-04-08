@@ -1,13 +1,21 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import {
   useBroadcasts,
   useCreateBroadcast,
+  useUpdateBroadcast,
   useStartBroadcast,
   useCancelBroadcast,
 } from '@/hooks/use-broadcasts';
+import type {
+  BroadcastBlockDto,
+  BroadcastDto,
+  CreateBroadcastBlock,
+  MediaItemDto,
+  UpdateBroadcastBlock,
+} from '@/lib/types/whatsapp';
 import { FUNNEL_STAGES, LEAD_TEMPERATURES, LEAD_CATEGORIES } from '@/lib/types/whatsapp';
 import { formatTimestamp, cn } from '@/lib/utils';
 import { AppPageShell } from '@/components/app-page-shell';
@@ -18,6 +26,9 @@ import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ApiError } from '@/lib/api/errors';
+import { downloadMediaItemAsFile } from '@/lib/api/client';
+import { useTenant } from '@/lib/tenant-context';
+import { AttachSourceModal, GalleryPickerModal } from '@/components/attach-media-modals';
 
 function parseDelayPatternSeconds(input: string): number[] | undefined {
   const parts = input
@@ -32,20 +43,157 @@ function parseDelayPatternSeconds(input: string): number[] | undefined {
   });
 }
 
+function newBlockId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `b_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+type UiTextBlock = {
+  id: string;
+  kind: 'text';
+  content: string;
+  mode: 'fixed' | 'variable';
+};
+
+type UiMediaBlock = {
+  id: string;
+  kind: 'media';
+  mediaType: 'image' | 'audio' | 'video' | 'document';
+  file: File | null;
+  caption: string;
+  audioPtt: boolean;
+  /** Edição: mídia já persistida — envio com keepExisting se o usuário não trocar o arquivo. */
+  preservedFromServer?: boolean;
+  serverMediaLabel?: string;
+};
+
+type UiBlock = UiTextBlock | UiMediaBlock;
+
+function acceptForMediaType(t: UiMediaBlock['mediaType']): string {
+  if (t === 'image') return 'image/*';
+  if (t === 'audio') return 'audio/*';
+  if (t === 'video') return 'video/*';
+  return '*/*';
+}
+
+function BroadcastMediaFilePreview({ file }: { file: File }) {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const mime = file.type || '';
+    if (mime.startsWith('image/') || mime.startsWith('video/') || mime.startsWith('audio/')) {
+      const u = URL.createObjectURL(file);
+      setUrl(u);
+      return () => URL.revokeObjectURL(u);
+    }
+    setUrl(null);
+  }, [file]);
+
+  if (!url) return null;
+
+  if (file.type.startsWith('image/')) {
+    return (
+      <div className="overflow-hidden rounded-xl border border-border/60 bg-muted/20">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={url}
+          alt={`Pré-visualização: ${file.name}`}
+          className="mx-auto max-h-56 w-full object-contain"
+        />
+      </div>
+    );
+  }
+
+  if (file.type.startsWith('video/')) {
+    return (
+      <div className="overflow-hidden rounded-xl border border-border/60 bg-black/30">
+        <video src={url} controls className="mx-auto max-h-56 w-full" />
+      </div>
+    );
+  }
+
+  if (file.type.startsWith('audio/')) {
+    return (
+      <div className="rounded-xl border border-border/60 bg-muted/20 px-3 py-2">
+        <audio src={url} controls className="w-full" />
+      </div>
+    );
+  }
+
+  return null;
+}
+
+function broadcastBlocksSummary(blocks: BroadcastBlockDto[]): string {
+  if (!blocks.length) return '—';
+  return [...blocks]
+    .sort((a, b) => a.order - b.order)
+    .map((bl, i) => {
+      if (bl.type === 'text') {
+        const preview = (bl.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 36);
+        const tag = bl.mode === 'variable' ? 'IA' : 'fixo';
+        return `${i + 1}. Texto (${tag})${preview ? ` — ${preview}${(bl.content ?? '').length > 36 ? '…' : ''}` : ''}`;
+      }
+      return `${i + 1}. ${bl.mediaType ?? 'mídia'}`;
+    })
+    .join(' · ');
+}
+
+function campaignUsesAi(b: BroadcastDto): boolean {
+  if (b.useAiVariation) return true;
+  return b.blocks.some((bl) => bl.type === 'text' && bl.mode === 'variable');
+}
+
+function isoToDatetimeLocal(iso: string | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** Rascunho com blocos reais no banco (não formato legado baseMessage). */
+function isBroadcastEditable(b: BroadcastDto): boolean {
+  return b.status === 'draft' && b.baseMessage === undefined;
+}
+
+function dtoToUiBlocks(dto: BroadcastDto): UiBlock[] {
+  const sorted = [...dto.blocks].sort((a, b) => a.order - b.order);
+  return sorted.map((bl) => {
+    if (bl.type === 'text') {
+      return { id: newBlockId(), kind: 'text', content: bl.content ?? '', mode: bl.mode ?? 'fixed' };
+    }
+    return {
+      id: newBlockId(),
+      kind: 'media',
+      mediaType: bl.mediaType ?? 'document',
+      file: null,
+      caption: bl.caption ?? '',
+      audioPtt: bl.audioPtt ?? false,
+      preservedFromServer: bl.hasMedia,
+      serverMediaLabel: bl.hasMedia ? bl.mediaFilename || 'Arquivo da campanha' : undefined,
+    };
+  });
+}
+
 export default function BroadcastPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
+  const { tenantId } = useTenant();
   const { data: broadcasts, isLoading } = useBroadcasts(sessionId);
   const createBroadcast = useCreateBroadcast(sessionId);
+  const updateBroadcast = useUpdateBroadcast(sessionId);
   const startBroadcast = useStartBroadcast(sessionId);
   const cancelBroadcast = useCancelBroadcast(sessionId);
 
   const [showForm, setShowForm] = useState(false);
+  const [editingBroadcastId, setEditingBroadcastId] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
   const [actionError, setActionError] = useState('');
   const [name, setName] = useState('');
-  const [baseMessage, setBaseMessage] = useState('');
-  const [variableMessage, setVariableMessage] = useState('');
-  const [useAi, setUseAi] = useState(true);
+  const [blocks, setBlocks] = useState<UiBlock[]>([
+    { id: newBlockId(), kind: 'text', content: '', mode: 'fixed' },
+  ]);
   const [deliveryChannel, setDeliveryChannel] = useState<'baileys_web' | 'cloud_api'>('baileys_web');
   const [recipientLimit, setRecipientLimit] = useState('500');
   const [funnelStage, setFunnelStage] = useState('');
@@ -64,11 +212,200 @@ export default function BroadcastPage() {
   const [delayPatternStr, setDelayPatternStr] = useState('');
   const [batchSize, setBatchSize] = useState('5');
   const [pauseBatch, setPauseBatch] = useState('60');
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const [attachSourceBlockId, setAttachSourceBlockId] = useState<string | null>(null);
+  const [galleryPickBlockId, setGalleryPickBlockId] = useState<string | null>(null);
+  const [pendingFileBlockId, setPendingFileBlockId] = useState<string | null>(null);
+  const [galleryLoading, setGalleryLoading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleCreate = () => {
-    if (!name.trim() || !baseMessage.trim()) return;
-    const hasVariable = variableMessage.trim().length > 0;
+  const pendingMediaBlock =
+    pendingFileBlockId != null
+      ? blocks.find((b): b is UiMediaBlock => b.kind === 'media' && b.id === pendingFileBlockId)
+      : undefined;
+
+  const galleryMediaBlock =
+    galleryPickBlockId != null
+      ? blocks.find((b): b is UiMediaBlock => b.kind === 'media' && b.id === galleryPickBlockId)
+      : undefined;
+
+  const addTextBlock = () => {
+    setBlocks((prev) => [...prev, { id: newBlockId(), kind: 'text', content: '', mode: 'fixed' }]);
+    setShowAddMenu(false);
+  };
+
+  const addMediaBlock = (mediaType: UiMediaBlock['mediaType']) => {
+    setBlocks((prev) => [
+      ...prev,
+      { id: newBlockId(), kind: 'media', mediaType, file: null, caption: '', audioPtt: false },
+    ]);
+    setShowAddMenu(false);
+  };
+
+  const removeBlock = (id: string) => {
+    setBlocks((prev) => (prev.length <= 1 ? prev : prev.filter((b) => b.id !== id)));
+  };
+
+  const moveBlock = (index: number, dir: -1 | 1) => {
+    setBlocks((prev) => {
+      const j = index + dir;
+      if (j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[j]] = [next[j], next[index]];
+      return next;
+    });
+  };
+
+  const updateTextBlock = (id: string, patch: Partial<Pick<UiTextBlock, 'content' | 'mode'>>) => {
+    setBlocks((prev) =>
+      prev.map((b) => (b.id === id && b.kind === 'text' ? { ...b, ...patch } : b)),
+    );
+  };
+
+  const updateMediaBlock = (
+    id: string,
+    patch: Partial<Pick<UiMediaBlock, 'mediaType' | 'file' | 'caption' | 'audioPtt' | 'preservedFromServer' | 'serverMediaLabel'>>,
+  ) => {
+    setBlocks((prev) =>
+      prev.map((b) => {
+        if (b.id !== id || b.kind !== 'media') return b;
+        const next = { ...b, ...patch };
+        if (patch.file != null) {
+          next.preservedFromServer = false;
+          next.serverMediaLabel = undefined;
+        }
+        return next;
+      }),
+    );
+  };
+
+  const handleGalleryPick = async (item: MediaItemDto) => {
+    const blockId = galleryPickBlockId;
+    const b = galleryMediaBlock;
+    if (!blockId || !b) return;
+    if (item.type !== b.mediaType) {
+      setFormError(`Este bloco é do tipo “${b.mediaType}”; o item da galeria é “${item.type}”.`);
+      return;
+    }
     setFormError('');
+    setGalleryLoading(true);
+    try {
+      const file = await downloadMediaItemAsFile(tenantId, sessionId, item);
+      updateMediaBlock(blockId, { file, preservedFromServer: false });
+      setGalleryPickBlockId(null);
+    } catch (e) {
+      setFormError(e instanceof ApiError ? e.message : 'Não foi possível carregar o arquivo da galeria.');
+    } finally {
+      setGalleryLoading(false);
+    }
+  };
+
+  const buildPayloadBlocks = (): CreateBroadcastBlock[] | null => {
+    const out: CreateBroadcastBlock[] = [];
+    for (const b of blocks) {
+      if (b.kind === 'text') {
+        if (!b.content.trim()) return null;
+        out.push({ type: 'text', content: b.content.trim(), mode: b.mode });
+      } else {
+        if (!b.file) return null;
+        out.push({
+          type: 'media',
+          mediaType: b.mediaType,
+          file: b.file,
+          caption: b.caption.trim() || undefined,
+          audioPtt: b.mediaType === 'audio' ? b.audioPtt : undefined,
+        });
+      }
+    }
+    return out;
+  };
+
+  const buildUpdatePayloadBlocks = (): UpdateBroadcastBlock[] | null => {
+    const out: UpdateBroadcastBlock[] = [];
+    for (const b of blocks) {
+      if (b.kind === 'text') {
+        if (!b.content.trim()) return null;
+        out.push({ type: 'text', content: b.content.trim(), mode: b.mode });
+      } else if (b.file) {
+        out.push({
+          type: 'media',
+          mediaType: b.mediaType,
+          file: b.file,
+          caption: b.caption.trim() || undefined,
+          audioPtt: b.mediaType === 'audio' ? b.audioPtt : undefined,
+        });
+      } else if (b.preservedFromServer) {
+        out.push({
+          type: 'media',
+          mediaType: b.mediaType,
+          keepExisting: true,
+          caption: b.caption.trim() || undefined,
+          audioPtt: b.mediaType === 'audio' ? b.audioPtt : undefined,
+        });
+      } else {
+        return null;
+      }
+    }
+    return out;
+  };
+
+  const resetFormToNew = () => {
+    setEditingBroadcastId(null);
+    setName('');
+    setBlocks([{ id: newBlockId(), kind: 'text', content: '', mode: 'fixed' }]);
+    setDeliveryChannel('baileys_web');
+    setRecipientLimit('500');
+    setFunnelStage('');
+    setTemperature('');
+    setCategory('');
+    setTagsStr('');
+    setSearch('');
+    setCreatedAtFrom('');
+    setCreatedAtTo('');
+    setFacebookCampaign('');
+    setValueMin('');
+    setValueMax('');
+    setCcl('');
+    setMinDelay('5');
+    setMaxDelay('15');
+    setDelayPatternStr('');
+    setBatchSize('5');
+    setPauseBatch('60');
+    setFormError('');
+  };
+
+  const openEditBroadcast = (b: BroadcastDto) => {
+    setEditingBroadcastId(b._id);
+    setName(b.name);
+    setDeliveryChannel(b.deliveryChannel);
+    setRecipientLimit(String(Math.max(1, b.totalRecipients || 500)));
+    setFunnelStage(b.filters.funnelStage ?? '');
+    setTemperature(b.filters.temperature ?? '');
+    setCategory(b.filters.category ?? '');
+    setTagsStr(b.filters.tags?.join(', ') ?? '');
+    setSearch(b.filters.search ?? '');
+    setCreatedAtFrom(isoToDatetimeLocal(b.filters.createdAtFrom));
+    setCreatedAtTo(isoToDatetimeLocal(b.filters.createdAtTo));
+    setFacebookCampaign(b.filters.facebookCampaign ?? '');
+    setValueMin(b.filters.valueMin != null ? String(b.filters.valueMin) : '');
+    setValueMax(b.filters.valueMax != null ? String(b.filters.valueMax) : '');
+    setCcl(b.filters.ccl ?? '');
+    setMinDelay(String(Math.round(b.cadence.minDelayMs / 1000)));
+    setMaxDelay(String(Math.round(b.cadence.maxDelayMs / 1000)));
+    setBatchSize(String(b.cadence.batchSize));
+    setPauseBatch(String(Math.round(b.cadence.pauseBetweenBatchesMs / 1000)));
+    setDelayPatternStr(
+      b.cadence.delayPatternMs?.length ? b.cadence.delayPatternMs.map((ms) => String(ms / 1000)).join(', ') : '',
+    );
+    setBlocks(dtoToUiBlocks(b));
+    setFormError('');
+    setShowForm(true);
+  };
+
+  const submitBroadcastForm = () => {
+    if (!name.trim()) return;
+    setFormError('');
+
     let delayPatternMs: number[] | undefined;
     try {
       delayPatternMs = delayPatternStr.trim() ? parseDelayPatternSeconds(delayPatternStr) : undefined;
@@ -82,50 +419,65 @@ export default function BroadcastPage() {
       .map((t) => t.trim())
       .filter(Boolean);
 
-    createBroadcast.mutate(
-      {
-        name: name.trim(),
-        baseMessage: baseMessage.trim(),
-        variableMessage: hasVariable ? variableMessage.trim() : undefined,
-        useAiVariation: hasVariable ? useAi : false,
-        deliveryChannel,
-        recipientLimit: Math.min(5000, Math.max(1, Number(recipientLimit) || 500)),
-        filters: {
-          funnelStage: funnelStage || undefined,
-          temperature: temperature || undefined,
-          category: category || undefined,
-          tags: tags.length ? tags : undefined,
-          search: search.trim() || undefined,
-          createdAtFrom: createdAtFrom ? new Date(createdAtFrom).toISOString() : undefined,
-          createdAtTo: createdAtTo ? new Date(createdAtTo).toISOString() : undefined,
-          facebookCampaign: facebookCampaign.trim() || undefined,
-          valueMin: valueMin.trim() !== '' ? Number(valueMin) : undefined,
-          valueMax: valueMax.trim() !== '' ? Number(valueMax) : undefined,
-          ccl: ccl.trim() || undefined,
-        },
-        cadence: {
-          minDelayMs: Number(minDelay) * 1000,
-          maxDelayMs: Number(maxDelay) * 1000,
-          batchSize: Number(batchSize),
-          pauseBetweenBatchesMs: Number(pauseBatch) * 1000,
-          ...(delayPatternMs?.length ? { delayPatternMs } : {}),
-        },
+    const sharedBody = {
+      name: name.trim(),
+      deliveryChannel,
+      recipientLimit: Math.min(5000, Math.max(1, Number(recipientLimit) || 500)),
+      filters: {
+        funnelStage: funnelStage || undefined,
+        temperature: temperature || undefined,
+        category: category || undefined,
+        tags: tags.length ? tags : undefined,
+        search: search.trim() || undefined,
+        createdAtFrom: createdAtFrom ? new Date(createdAtFrom).toISOString() : undefined,
+        createdAtTo: createdAtTo ? new Date(createdAtTo).toISOString() : undefined,
+        facebookCampaign: facebookCampaign.trim() || undefined,
+        valueMin: valueMin.trim() !== '' ? Number(valueMin) : undefined,
+        valueMax: valueMax.trim() !== '' ? Number(valueMax) : undefined,
+        ccl: ccl.trim() || undefined,
       },
+      cadence: {
+        minDelayMs: Number(minDelay) * 1000,
+        maxDelayMs: Number(maxDelay) * 1000,
+        batchSize: Number(batchSize),
+        pauseBetweenBatchesMs: Number(pauseBatch) * 1000,
+        ...(delayPatternMs?.length ? { delayPatternMs } : {}),
+      },
+    };
+
+    if (editingBroadcastId) {
+      const payloadBlocks = buildUpdatePayloadBlocks();
+      if (!payloadBlocks || payloadBlocks.length === 0) {
+        setFormError('Preencha todos os blocos (texto ou mídia; mantenha a mídia já salva ou envie arquivo novo).');
+        return;
+      }
+      updateBroadcast.mutate(
+        { broadcastId: editingBroadcastId, body: { ...sharedBody, blocks: payloadBlocks } },
+        {
+          onSuccess: () => {
+            setShowForm(false);
+            resetFormToNew();
+          },
+          onError: (err) => {
+            setFormError(err instanceof ApiError ? err.message : 'Falha ao salvar campanha');
+          },
+        },
+      );
+      return;
+    }
+
+    const payloadBlocks = buildPayloadBlocks();
+    if (!payloadBlocks || payloadBlocks.length === 0) {
+      setFormError('Adicione pelo menos um bloco válido (texto preenchido ou arquivo de mídia).');
+      return;
+    }
+
+    createBroadcast.mutate(
+      { ...sharedBody, blocks: payloadBlocks },
       {
         onSuccess: () => {
           setShowForm(false);
-          setName('');
-          setBaseMessage('');
-          setVariableMessage('');
-          setTagsStr('');
-          setSearch('');
-          setCreatedAtFrom('');
-          setCreatedAtTo('');
-          setFacebookCampaign('');
-          setValueMin('');
-          setValueMax('');
-          setCcl('');
-          setDelayPatternStr('');
+          resetFormToNew();
         },
         onError: (err) => {
           setFormError(err instanceof ApiError ? err.message : 'Falha ao criar campanha');
@@ -142,6 +494,17 @@ export default function BroadcastPage() {
     cancelled: 'bg-destructive/12 text-destructive ring-1 ring-destructive/20',
   };
 
+  const blocksValid =
+    blocks.length > 0 &&
+    blocks.every((b) =>
+      b.kind === 'text'
+        ? b.content.trim().length > 0
+        : b.file !== null || b.preservedFromServer === true,
+    );
+
+  const savePending = createBroadcast.isPending || updateBroadcast.isPending;
+  const canSubmit = Boolean(name.trim() && blocksValid && !savePending);
+
   return (
     <AppPageShell size="content" className="animate-fade-in">
       <div className="space-y-8">
@@ -155,7 +518,13 @@ export default function BroadcastPage() {
           description={`Dispare mensagens para leads filtrados da sessão ${sessionId}, com cadência anti-bloqueio e filtros avançados.`}
           backHref={`/sessions/${sessionId}`}
           actions={
-            <Button onClick={() => setShowForm(true)} className="h-10 gap-2">
+            <Button
+              onClick={() => {
+                resetFormToNew();
+                setShowForm(true);
+              }}
+              className="h-10 gap-2"
+            >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M12 5v14M5 12h14" />
               </svg>
@@ -167,9 +536,13 @@ export default function BroadcastPage() {
         {showForm && (
           <div className="app-glass-panel space-y-5 p-6 sm:p-8 animate-slide-up">
             <div>
-              <h2 className="text-sm font-bold tracking-tight text-foreground">Nova campanha</h2>
+              <h2 className="text-sm font-bold tracking-tight text-foreground">
+                {editingBroadcastId ? 'Editar campanha' : 'Nova campanha'}
+              </h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                Mensagem, filtros de lead (tags, datas, campanha FB, valor, CCL), canal de entrega e cadência.
+                Monte a sequência de mensagens: cada bloco é um envio separado no WhatsApp, com ~5–10s aleatórios entre blocos.
+                Entre um destinatário e outro vale a cadência abaixo.
+                {editingBroadcastId && ' Ao salvar, a lista de destinatários é recalculada com os filtros e o limite abaixo.'}
               </p>
             </div>
 
@@ -184,58 +557,233 @@ export default function BroadcastPage() {
               <Input id="bc-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: Promoção Janeiro" className="h-10 text-sm" />
             </div>
 
-            <div className="space-y-2">
-              <label htmlFor="bc-msg" className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Mensagem fixa
-              </label>
-              <p className="text-[10px] text-muted-foreground -mt-1">Essa parte é enviada exatamente como digitada — a IA não altera.</p>
-              <textarea
-                id="bc-msg"
-                value={baseMessage}
-                onChange={(e) => setBaseMessage(e.target.value)}
-                placeholder="Ex: Olá! Temos condições especiais para você:\n\nApto 3Q no Centro — R$ 450.000\nFinanciamento em até 360x"
-                rows={4}
-                className="w-full resize-none rounded-xl border border-input bg-card/80 px-3 py-2.5 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              />
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Blocos da mensagem</p>
+                  <p className="text-[10px] text-muted-foreground">Ordem = ordem de envio. Texto: fixo ou variado pela IA por destinatário.</p>
+                </div>
+                <div className="relative">
+                  <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => setShowAddMenu((v) => !v)}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                    Adicionar bloco
+                  </Button>
+                  {showAddMenu && (
+                    <div
+                      className="absolute right-0 z-20 mt-1 min-w-[200px] rounded-xl border border-border bg-card py-1 shadow-lg"
+                      role="menu"
+                    >
+                      <button
+                        type="button"
+                        className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/60"
+                        onClick={addTextBlock}
+                      >
+                        Texto
+                      </button>
+                      <div className="border-t border-border/60 px-2 py-1 text-[9px] font-semibold uppercase text-muted-foreground">Mídia</div>
+                      <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/60" onClick={() => addMediaBlock('image')}>
+                        Imagem
+                      </button>
+                      <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/60" onClick={() => addMediaBlock('audio')}>
+                        Áudio
+                      </button>
+                      <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/60" onClick={() => addMediaBlock('video')}>
+                        Vídeo
+                      </button>
+                      <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/60" onClick={() => addMediaBlock('document')}>
+                        Arquivo / documento
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <ul className="space-y-3" aria-label="Lista de blocos">
+                {blocks.map((b, index) => (
+                  <li key={b.id}>
+                    {index > 0 && (
+                      <p className="mb-2 text-center text-[9px] font-medium text-primary/70">↓ ~5–10s aleatórios ↓</p>
+                    )}
+                    <div className="rounded-xl border border-border/60 bg-muted/10 p-4 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                          Bloco {index + 1}
+                          {b.kind === 'text' ? ' · Texto' : ` · ${b.mediaType}`}
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-[10px]" onClick={() => moveBlock(index, -1)} disabled={index === 0}>
+                            Subir
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-[10px]"
+                            onClick={() => moveBlock(index, 1)}
+                            disabled={index === blocks.length - 1}
+                          >
+                            Descer
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-[10px] text-destructive"
+                            onClick={() => removeBlock(b.id)}
+                            disabled={blocks.length <= 1}
+                          >
+                            Remover
+                          </Button>
+                        </div>
+                      </div>
+
+                      {b.kind === 'text' && (
+                        <>
+                          <div className="flex flex-wrap gap-3">
+                            <label className="flex cursor-pointer items-center gap-2 text-xs">
+                              <input
+                                type="radio"
+                                name={`mode-${b.id}`}
+                                checked={b.mode === 'fixed'}
+                                onChange={() => updateTextBlock(b.id, { mode: 'fixed' })}
+                                className="h-3.5 w-3.5 border-input text-primary"
+                              />
+                              Fixo (sem IA)
+                            </label>
+                            <label className="flex cursor-pointer items-center gap-2 text-xs">
+                              <input
+                                type="radio"
+                                name={`mode-${b.id}`}
+                                checked={b.mode === 'variable'}
+                                onChange={() => updateTextBlock(b.id, { mode: 'variable' })}
+                                className="h-3.5 w-3.5 border-input text-primary"
+                              />
+                              Variável (IA anti-bloqueio)
+                            </label>
+                          </div>
+                          <textarea
+                            value={b.content}
+                            onChange={(e) => updateTextBlock(b.id, { content: e.target.value })}
+                            placeholder="Digite o texto deste bloco…"
+                            rows={3}
+                            className="w-full resize-none rounded-xl border border-input bg-card/80 px-3 py-2.5 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            aria-label={`Texto do bloco ${index + 1}`}
+                          />
+                        </>
+                      )}
+
+                      {b.kind === 'media' && (
+                        <>
+                          <div className="space-y-1.5">
+                            <span className="text-[10px] text-muted-foreground">Arquivo</span>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-9 text-xs"
+                                onClick={() => setAttachSourceBlockId(b.id)}
+                              >
+                                {b.file || b.preservedFromServer ? 'Trocar arquivo' : 'Selecionar arquivo'}
+                              </Button>
+                            </div>
+                            <p className="text-[10px] text-muted-foreground">
+                              Escolha entre arquivo neste dispositivo ou item da galeria da sessão.
+                            </p>
+                            {b.preservedFromServer && !b.file && b.serverMediaLabel && (
+                              <p className="text-[10px] font-medium text-emerald-600/90 dark:text-emerald-400/90">
+                                Mantendo: {b.serverMediaLabel} (sem reenvio até você trocar)
+                              </p>
+                            )}
+                            {b.file && (
+                              <>
+                                <p className="text-[10px] text-muted-foreground">
+                                  Selecionado: {b.file.name} ({Math.round(b.file.size / 1024)} KB)
+                                </p>
+                                {b.mediaType === 'image' && b.file.type.startsWith('image/') && (
+                                  <BroadcastMediaFilePreview file={b.file} />
+                                )}
+                                {b.mediaType === 'video' && b.file.type.startsWith('video/') && (
+                                  <BroadcastMediaFilePreview file={b.file} />
+                                )}
+                                {b.mediaType === 'audio' && b.file.type.startsWith('audio/') && (
+                                  <BroadcastMediaFilePreview file={b.file} />
+                                )}
+                              </>
+                            )}
+                          </div>
+                          {(b.mediaType === 'image' || b.mediaType === 'video') && (
+                            <div className="space-y-1">
+                              <label className="text-[10px] text-muted-foreground" htmlFor={`cap-${b.id}`}>
+                                Legenda (opcional)
+                              </label>
+                              <Input
+                                id={`cap-${b.id}`}
+                                value={b.caption}
+                                onChange={(e) => updateMediaBlock(b.id, { caption: e.target.value })}
+                                className="h-9 text-xs"
+                                maxLength={1024}
+                              />
+                            </div>
+                          )}
+                          {b.mediaType === 'audio' && (
+                            <label className="flex cursor-pointer items-center gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={b.audioPtt}
+                                onChange={(e) => updateMediaBlock(b.id, { audioPtt: e.target.checked })}
+                                className="h-4 w-4 rounded border-input text-primary"
+                              />
+                              Enviar como nota de voz (PTT)
+                            </label>
+                          )}
+                          <div className="space-y-1">
+                            <label className="text-[10px] text-muted-foreground">Tipo de mídia</label>
+                            <select
+                              value={b.mediaType}
+                              disabled={Boolean(b.preservedFromServer && !b.file)}
+                              title={
+                                b.preservedFromServer && !b.file
+                                  ? 'Troque o arquivo para mudar o tipo de mídia'
+                                  : undefined
+                              }
+                              onChange={(e) =>
+                                updateMediaBlock(b.id, {
+                                  mediaType: e.target.value as UiMediaBlock['mediaType'],
+                                })
+                              }
+                              className="h-9 w-full max-w-xs cursor-pointer rounded-lg border border-input bg-card px-2 text-xs shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              <option value="image">Imagem</option>
+                              <option value="audio">Áudio</option>
+                              <option value="video">Vídeo</option>
+                              <option value="document">Documento</option>
+                            </select>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </div>
 
-            <div className="space-y-2">
-              <label htmlFor="bc-var" className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Mensagem variável (IA)
-              </label>
-              <p className="text-[10px] text-muted-foreground -mt-1">Parte que a IA vai reescrever de forma diferente para cada destinatário (anti-bloqueio). Deixe vazio se não quiser variação.</p>
-              <textarea
-                id="bc-var"
-                value={variableMessage}
-                onChange={(e) => setVariableMessage(e.target.value)}
-                placeholder="Ex: Quer agendar uma visita? Temos horários disponíveis essa semana. Responda aqui que entro em contato!"
-                rows={3}
-                className="w-full resize-none rounded-xl border border-input bg-card/80 px-3 py-2.5 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              />
-            </div>
-
-            {variableMessage.trim() && (
-              <label className="flex cursor-pointer items-center gap-2.5 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5 transition-colors hover:bg-muted/35">
-                <input
-                  type="checkbox"
-                  checked={useAi}
-                  onChange={(e) => setUseAi(e.target.checked)}
-                  className="h-4 w-4 rounded border-input text-primary focus:ring-primary"
-                />
-                <span className="text-xs font-medium">Variar mensagem com IA (anti-bloqueio; preserva valores com Gemini)</span>
-              </label>
-            )}
-
-            {baseMessage.trim() && (
+            {blocks.some((b) => b.kind === 'text' && b.content.trim()) && (
               <div className="rounded-xl border border-border/40 bg-muted/10 px-4 py-3 space-y-1">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Pré-visualização da mensagem</p>
-                <p className="whitespace-pre-wrap text-xs text-foreground/80 leading-relaxed">
-                  {baseMessage.trim()}
-                  {variableMessage.trim() ? '\n\n' + variableMessage.trim() : ''}
-                </p>
-                {variableMessage.trim() && useAi && (
-                  <p className="text-[9px] text-primary/70 mt-1.5">↑ A parte variável será reescrita pela IA a cada envio</p>
-                )}
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Pré-visualização (texto bruto)</p>
+                <p className="text-[10px] text-muted-foreground">Blocos variáveis mostram o texto base; a IA reescreve no envio.</p>
+                <div className="mt-2 space-y-2 text-xs text-foreground/80">
+                  {blocks.map((b, i) =>
+                    b.kind === 'text' && b.content.trim() ? (
+                      <p key={b.id} className="whitespace-pre-wrap rounded-lg bg-card/50 p-2 ring-1 ring-border/40">
+                        <span className="font-semibold text-primary/80">#{i + 1}</span> {b.content.trim()}
+                        {b.mode === 'variable' ? ' · (IA)' : ''}
+                      </p>
+                    ) : null,
+                  )}
+                </div>
               </div>
             )}
 
@@ -369,9 +917,10 @@ export default function BroadcastPage() {
             </div>
 
             <div className="space-y-3">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Cadência</p>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Cadência (entre destinatários)</p>
               <p className="text-[10px] text-muted-foreground">
-                Se preencher <strong>sequência</strong>, ela substitui o delay aleatório min/max entre cada envio (valores em segundos, ex.: 10, 15, 25).
+                Se preencher <strong>sequência</strong>, ela substitui o delay aleatório min/max entre cada <strong>destinatário</strong> (valores em
+                segundos, ex.: 10, 15, 25).
               </p>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <div className="space-y-1">
@@ -404,14 +953,21 @@ export default function BroadcastPage() {
 
             <div className="flex flex-wrap gap-2 border-t border-border/50 pt-5">
               <Button
-                onClick={handleCreate}
-                disabled={!name.trim() || !baseMessage.trim() || createBroadcast.isPending}
-                title={!name.trim() || !baseMessage.trim() ? 'Preencha o nome e a mensagem fixa' : undefined}
+                onClick={submitBroadcastForm}
+                disabled={!canSubmit}
+                title={!name.trim() ? 'Preencha o nome' : !blocksValid ? 'Preencha todos os blocos' : undefined}
                 className="gap-2"
               >
-                {createBroadcast.isPending ? <Spinner className="h-4 w-4" /> : 'Criar campanha'}
+                {savePending ? <Spinner className="h-4 w-4" /> : editingBroadcastId ? 'Salvar alterações' : 'Criar campanha'}
               </Button>
-              <Button variant="outline" type="button" onClick={() => setShowForm(false)}>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => {
+                  setShowForm(false);
+                  resetFormToNew();
+                }}
+              >
                 Cancelar
               </Button>
             </div>
@@ -438,7 +994,10 @@ export default function BroadcastPage() {
         )}
 
         <div className="space-y-4">
-          {broadcasts?.map((b, i) => (
+          {broadcasts?.map((b, i) => {
+            const startingThis =
+              startBroadcast.isPending && startBroadcast.variables === b._id;
+            return (
             <div
               key={b._id}
               className="app-session-card p-5 animate-slide-up"
@@ -456,12 +1015,13 @@ export default function BroadcastPage() {
                         API oficial
                       </Badge>
                     )}
-                    {b.useAiVariation && <Badge variant="info" className="text-[9px]">IA</Badge>}
+                    {campaignUsesAi(b) && (
+                      <Badge variant="info" className="text-[9px]">
+                        IA
+                      </Badge>
+                    )}
                   </div>
-                  <p className="mb-3 line-clamp-3 text-xs leading-relaxed text-muted-foreground">
-                    {b.baseMessage}
-                    {b.variableMessage ? '\n\n' + b.variableMessage : ''}
-                  </p>
+                  <p className="mb-3 line-clamp-4 text-xs leading-relaxed text-muted-foreground">{broadcastBlocksSummary(b.blocks)}</p>
                   <div className="flex flex-wrap gap-1.5 text-[9px] text-muted-foreground">
                     {b.filters.tags && b.filters.tags.length > 0 && (
                       <span className="rounded bg-muted/80 px-1.5 py-0.5">tags: {b.filters.tags.join(', ')}</span>
@@ -481,6 +1041,14 @@ export default function BroadcastPage() {
                     {b.failedCount > 0 && <span className="font-medium text-destructive">{b.failedCount} falhas</span>}
                     <span>{formatTimestamp(b.createdAt)}</span>
                   </div>
+                  {b.failedCount > 0 && b.sampleRecipientError && (
+                    <p
+                      className="mt-2 rounded-lg border border-destructive/25 bg-destructive/5 px-3 py-2 text-[11px] leading-snug text-destructive"
+                      title={b.sampleRecipientError}
+                    >
+                      {b.sampleRecipientError}
+                    </p>
+                  )}
 
                   {b.status === 'running' && b.totalRecipients > 0 && (
                     <div className="mt-3">
@@ -497,7 +1065,22 @@ export default function BroadcastPage() {
                   )}
                 </div>
 
-                <div className="flex shrink-0 gap-2 sm:flex-col">
+                <div className="flex shrink-0 flex-wrap gap-2 sm:flex-col sm:items-stretch">
+                  {b.status === 'draft' && isBroadcastEditable(b) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      type="button"
+                      onClick={() => openEditBroadcast(b)}
+                      className="cursor-pointer gap-1.5"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                        <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                        <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                      </svg>
+                      Editar
+                    </Button>
+                  )}
                   {b.status === 'draft' && (
                     <Button
                       size="sm"
@@ -505,14 +1088,26 @@ export default function BroadcastPage() {
                         setActionError('');
                         startBroadcast.mutate(b._id, {
                           onError: (err) => {
-                            setActionError(err instanceof ApiError ? `${err.message}` : 'Não foi possível iniciar a campanha.');
+                            setActionError(
+                              err instanceof ApiError
+                                ? `${err.message}`
+                                : 'Não foi possível iniciar a campanha.',
+                            );
                           },
                         });
                       }}
                       disabled={startBroadcast.isPending}
-                      className="cursor-pointer"
+                      aria-busy={startingThis}
+                      className="min-w-30 cursor-pointer gap-2"
                     >
-                      Iniciar
+                      {startingThis ? (
+                        <>
+                          <Spinner className="h-3.5 w-3.5 shrink-0" />
+                          <span>Iniciando…</span>
+                        </>
+                      ) : (
+                        'Iniciar'
+                      )}
                     </Button>
                   )}
                   {b.status === 'running' && (
@@ -529,9 +1124,58 @@ export default function BroadcastPage() {
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="sr-only"
+        aria-hidden
+        tabIndex={-1}
+        accept={pendingMediaBlock ? acceptForMediaType(pendingMediaBlock.mediaType) : '*/*'}
+        onChange={(e) => {
+          const id = pendingFileBlockId;
+          setPendingFileBlockId(null);
+          const f = e.target.files?.[0];
+          if (id && f) updateMediaBlock(id, { file: f });
+          e.target.value = '';
+        }}
+      />
+
+      <AttachSourceModal
+        open={attachSourceBlockId !== null}
+        onOpenChange={(open) => {
+          if (!open) setAttachSourceBlockId(null);
+        }}
+        onChooseComputer={() => {
+          const id = attachSourceBlockId;
+          setAttachSourceBlockId(null);
+          if (id) {
+            setPendingFileBlockId(id);
+            requestAnimationFrame(() => fileInputRef.current?.click());
+          }
+        }}
+        onChooseGallery={() => {
+          const id = attachSourceBlockId;
+          setAttachSourceBlockId(null);
+          if (id) setGalleryPickBlockId(id);
+        }}
+      />
+
+      <GalleryPickerModal
+        open={galleryPickBlockId !== null && galleryMediaBlock != null}
+        onOpenChange={(open) => {
+          if (!open) setGalleryPickBlockId(null);
+        }}
+        sessionId={sessionId}
+        onPick={handleGalleryPick}
+        isSending={galleryLoading}
+        lockTypeFilter
+        initialTypeFilter={galleryMediaBlock?.mediaType ?? 'image'}
+      />
     </AppPageShell>
   );
 }
