@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3001';
+const BASE = 'http://localhost:3002';
 
 export const handlers = [
   http.get(`${BASE}/health`, () =>

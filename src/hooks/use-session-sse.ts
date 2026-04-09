@@ -6,7 +6,7 @@ import { fetchEventSource } from '@microsoft/fetch-event-source';
 import { useTenant } from '@/lib/tenant-context';
 import type { WaSessionPublicState } from '@/lib/types/whatsapp';
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:3001';
+const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:3002';
 
 export function useSessionSSE(sessionId: string) {
   const { tenantId } = useTenant();

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useTenant } from '@/lib/tenant-context';
 import { getMediaDownloadUrl } from '@/lib/api/client';
 
@@ -13,35 +13,40 @@ type MediaThumbnailProps = {
 };
 
 /**
- * Renders an image thumbnail for gallery items.
- * Uses `mediaUrl` (R2 public URL) when available, otherwise
- * fetches from the authenticated download endpoint and creates a blob URL.
+ * Miniatura da galeria.
+ * Se existir `mediaUrl` (R2), tenta carregar direto; em falha (bucket privado, CORS, URL errada)
+ * usa o endpoint autenticado `/download` — mesmo fluxo que quando o arquivo só está no Mongo.
  */
 export function MediaThumbnail({ sessionId, mediaId, mediaUrl, alt = '', className = '' }: MediaThumbnailProps) {
   const { tenantId } = useTenant();
-  const [src, setSrc] = useState<string | null>(mediaUrl ?? null);
+  const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  /** Após erro no `<img>` com URL pública do R2, usa o download autenticado. */
+  const [forceApi, setForceApi] = useState(false);
+  const tryDirectUrl = Boolean(mediaUrl) && !forceApi;
+
+  const loadFromApi = useCallback(async () => {
+    const url = getMediaDownloadUrl(sessionId, mediaId);
+    const res = await fetch(url, {
+      headers: { 'X-Tenant-Id': tenantId },
+    });
+    if (!res.ok) throw new Error('download failed');
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  }, [tenantId, sessionId, mediaId]);
 
   useEffect(() => {
-    // If we already have a direct R2 URL, just use it
-    if (mediaUrl) {
+    if (tryDirectUrl && mediaUrl) {
       setSrc(mediaUrl);
       return;
     }
 
-    // Otherwise fetch via the authenticated download endpoint
     let cancelled = false;
     let blobUrl: string | null = null;
 
     (async () => {
       try {
-        const url = getMediaDownloadUrl(sessionId, mediaId);
-        const res = await fetch(url, {
-          headers: { 'X-Tenant-Id': tenantId },
-        });
-        if (!res.ok) throw new Error('download failed');
-        const blob = await res.blob();
-        blobUrl = URL.createObjectURL(blob);
+        blobUrl = await loadFromApi();
         if (!cancelled) setSrc(blobUrl);
       } catch {
         if (!cancelled) setFailed(true);
@@ -52,10 +57,19 @@ export function MediaThumbnail({ sessionId, mediaId, mediaUrl, alt = '', classNa
       cancelled = true;
       if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
-  }, [tenantId, sessionId, mediaId, mediaUrl]);
+  }, [tenantId, sessionId, mediaId, mediaUrl, tryDirectUrl, loadFromApi]);
+
+  const handleImgError = () => {
+    if (mediaUrl && !forceApi) {
+      setForceApi(true);
+      setSrc(null);
+      return;
+    }
+    setFailed(true);
+  };
 
   if (failed || !src) {
-    return null; // Caller shows fallback icon
+    return null;
   }
 
   return (
@@ -64,7 +78,7 @@ export function MediaThumbnail({ sessionId, mediaId, mediaUrl, alt = '', classNa
       src={src}
       alt={alt}
       className={className}
-      onError={() => setFailed(true)}
+      onError={handleImgError}
     />
   );
 }
