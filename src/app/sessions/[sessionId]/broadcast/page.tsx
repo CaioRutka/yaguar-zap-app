@@ -12,6 +12,7 @@ import {
 import type {
   BroadcastBlockDto,
   BroadcastDto,
+  BroadcastTextDeliveryMode,
   CreateBroadcastBlock,
   MediaItemDto,
   UpdateBroadcastBlock,
@@ -145,6 +146,43 @@ function campaignUsesAi(b: BroadcastDto): boolean {
   return b.blocks.some((bl) => bl.type === 'text' && bl.mode === 'variable');
 }
 
+function interBlockHint(
+  prev: UiBlock,
+  curr: UiBlock,
+  textDeliveryMode: BroadcastTextDeliveryMode,
+): 'merged-text' | 'delay' {
+  if (textDeliveryMode === 'merged' && prev.kind === 'text' && curr.kind === 'text') {
+    return 'merged-text';
+  }
+  return 'delay';
+}
+
+type MergedPreviewSeg = { kind: 'textRun'; body: string } | { kind: 'media'; label: string };
+
+/** Pré-visualização no modo texto unificado: mantém a ordem (trechos de texto vs mídia). */
+function buildMergedPreviewSegments(blocks: UiBlock[]): MergedPreviewSeg[] {
+  const out: MergedPreviewSeg[] = [];
+  let textBuf: string[] = [];
+
+  const flushText = () => {
+    const joined = textBuf.join('\n\n').trim();
+    textBuf = [];
+    if (joined) out.push({ kind: 'textRun', body: joined });
+  };
+
+  for (const b of blocks) {
+    if (b.kind === 'text') {
+      const t = b.content.trim();
+      if (t) textBuf.push(t);
+    } else {
+      flushText();
+      out.push({ kind: 'media', label: b.mediaType });
+    }
+  }
+  flushText();
+  return out;
+}
+
 function isoToDatetimeLocal(iso: string | undefined): string {
   if (!iso) return '';
   const d = new Date(iso);
@@ -195,6 +233,7 @@ export default function BroadcastPage() {
     { id: newBlockId(), kind: 'text', content: '', mode: 'fixed' },
   ]);
   const [deliveryChannel, setDeliveryChannel] = useState<'baileys_web' | 'cloud_api'>('baileys_web');
+  const [textDeliveryMode, setTextDeliveryMode] = useState<BroadcastTextDeliveryMode>('per_block');
   const [recipientLimit, setRecipientLimit] = useState('500');
   const [funnelStage, setFunnelStage] = useState('');
   const [temperature, setTemperature] = useState('');
@@ -354,6 +393,7 @@ export default function BroadcastPage() {
     setName('');
     setBlocks([{ id: newBlockId(), kind: 'text', content: '', mode: 'fixed' }]);
     setDeliveryChannel('baileys_web');
+    setTextDeliveryMode('per_block');
     setRecipientLimit('500');
     setFunnelStage('');
     setTemperature('');
@@ -378,6 +418,7 @@ export default function BroadcastPage() {
     setEditingBroadcastId(b._id);
     setName(b.name);
     setDeliveryChannel(b.deliveryChannel);
+    setTextDeliveryMode(b.textDeliveryMode ?? 'per_block');
     setRecipientLimit(String(Math.max(1, b.totalRecipients || 500)));
     setFunnelStage(b.filters.funnelStage ?? '');
     setTemperature(b.filters.temperature ?? '');
@@ -421,6 +462,7 @@ export default function BroadcastPage() {
 
     const sharedBody = {
       name: name.trim(),
+      textDeliveryMode,
       deliveryChannel,
       recipientLimit: Math.min(5000, Math.max(1, Number(recipientLimit) || 500)),
       filters: {
@@ -540,8 +582,10 @@ export default function BroadcastPage() {
                 {editingBroadcastId ? 'Editar campanha' : 'Nova campanha'}
               </h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                Monte a sequência de mensagens: cada bloco é um envio separado no WhatsApp, com ~5–10s aleatórios entre blocos.
-                Entre um destinatário e outro vale a cadência abaixo.
+                Monte a sequência de blocos. Com <strong>um WhatsApp por bloco de texto</strong>, há ~10–15s aleatórios entre cada
+                envio. Com <strong>texto unificado</strong>, blocos de texto consecutivos viram uma única mensagem (separados por
+                linha em branco); blocos de mídia continuam em envios separados. Entre um destinatário e outro vale a cadência
+                abaixo.
                 {editingBroadcastId && ' Ao salvar, a lista de destinatários é recalculada com os filtros e o limite abaixo.'}
               </p>
             </div>
@@ -555,6 +599,41 @@ export default function BroadcastPage() {
                 Nome
               </label>
               <Input id="bc-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: Promoção Janeiro" className="h-10 text-sm" />
+            </div>
+
+            <div className="space-y-3 rounded-xl border border-border/40 bg-muted/5 px-4 py-3">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Envio dos blocos de texto</p>
+              <div className="mt-2 flex flex-col gap-2">
+                <label className="flex cursor-pointer items-start gap-2.5 text-xs leading-snug">
+                  <input
+                    type="radio"
+                    name="text-delivery-mode"
+                    checked={textDeliveryMode === 'per_block'}
+                    onChange={() => setTextDeliveryMode('per_block')}
+                    className="mt-0.5 h-3.5 w-3.5 border-input text-primary"
+                  />
+                  <span>
+                    <span className="font-medium text-foreground">Um WhatsApp por bloco de texto</span>
+                    <span className="block text-[10px] text-muted-foreground">Cada bloco de texto é uma mensagem; ~10–15s entre blocos.</span>
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-2.5 text-xs leading-snug">
+                  <input
+                    type="radio"
+                    name="text-delivery-mode"
+                    checked={textDeliveryMode === 'merged'}
+                    onChange={() => setTextDeliveryMode('merged')}
+                    className="mt-0.5 h-3.5 w-3.5 border-input text-primary"
+                  />
+                  <span>
+                    <span className="font-medium text-foreground">Texto unificado</span>
+                    <span className="block text-[10px] text-muted-foreground">
+                      Vários blocos de texto seguidos viram <strong>uma</strong> mensagem (partes com linha em branco). Cada bloco
+                      variável (IA) ainda é reescrito por trecho antes de juntar. Mídia continua em mensagens à parte.
+                    </span>
+                  </span>
+                </label>
+              </div>
             </div>
 
             <div className="space-y-3">
@@ -604,7 +683,13 @@ export default function BroadcastPage() {
                 {blocks.map((b, index) => (
                   <li key={b.id}>
                     {index > 0 && (
-                      <p className="mb-2 text-center text-[9px] font-medium text-primary/70">↓ ~5–10s aleatórios ↓</p>
+                      <p className="mb-2 text-center text-[9px] font-medium text-primary/70">
+                        {interBlockHint(blocks[index - 1]!, b, textDeliveryMode) === 'merged-text' ? (
+                          <>↳ Textos unificados no mesmo envio</>
+                        ) : (
+                          <>↓ ~10–15s aleatórios ↓</>
+                        )}
+                      </p>
                     )}
                     <div className="rounded-xl border border-border/60 bg-muted/10 p-4 space-y-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -773,17 +858,58 @@ export default function BroadcastPage() {
             {blocks.some((b) => b.kind === 'text' && b.content.trim()) && (
               <div className="rounded-xl border border-border/40 bg-muted/10 px-4 py-3 space-y-1">
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Pré-visualização (texto bruto)</p>
-                <p className="text-[10px] text-muted-foreground">Blocos variáveis mostram o texto base; a IA reescreve no envio.</p>
-                <div className="mt-2 space-y-2 text-xs text-foreground/80">
-                  {blocks.map((b, i) =>
-                    b.kind === 'text' && b.content.trim() ? (
-                      <p key={b.id} className="whitespace-pre-wrap rounded-lg bg-card/50 p-2 ring-1 ring-border/40">
-                        <span className="font-semibold text-primary/80">#{i + 1}</span> {b.content.trim()}
-                        {b.mode === 'variable' ? ' · (IA)' : ''}
-                      </p>
-                    ) : null,
+                <p className="text-[10px] text-muted-foreground">
+                  Blocos variáveis mostram o texto base; a IA reescreve no envio.
+                  {textDeliveryMode === 'merged' && (
+                    <span className="block mt-1">
+                      Modo unificado: a prévia abaixo mostra como as partes de texto aparecerão juntas (sem IA aplicada aqui).
+                    </span>
                   )}
-                </div>
+                </p>
+                {textDeliveryMode === 'merged' ? (
+                  <div className="mt-2 space-y-2 text-xs text-foreground/80">
+                    {(() => {
+                      const segs = buildMergedPreviewSegments(blocks);
+                      if (segs.length === 0) return <p className="text-muted-foreground">—</p>;
+                      let textRunIdx = 0;
+                      return segs.map((seg, i) => {
+                        if (seg.kind === 'textRun') {
+                          textRunIdx += 1;
+                          return (
+                            <p
+                              key={`t-${i}`}
+                              className="whitespace-pre-wrap rounded-lg bg-card/50 p-3 ring-1 ring-border/40"
+                            >
+                              <span className="mb-1 block text-[9px] font-semibold uppercase tracking-wide text-primary/80">
+                                Texto unificado (envio de texto nº {textRunIdx})
+                              </span>
+                              {seg.body}
+                            </p>
+                          );
+                        }
+                        return (
+                          <p
+                            key={`m-${i}`}
+                            className="rounded-lg border border-dashed border-border/60 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground"
+                          >
+                            Mídia ({seg.label}) — envio separado
+                          </p>
+                        );
+                      });
+                    })()}
+                  </div>
+                ) : (
+                  <div className="mt-2 space-y-2 text-xs text-foreground/80">
+                    {blocks.map((b, i) =>
+                      b.kind === 'text' && b.content.trim() ? (
+                        <p key={b.id} className="whitespace-pre-wrap rounded-lg bg-card/50 p-2 ring-1 ring-border/40">
+                          <span className="font-semibold text-primary/80">#{i + 1}</span> {b.content.trim()}
+                          {b.mode === 'variable' ? ' · (IA)' : ''}
+                        </p>
+                      ) : null,
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1018,6 +1144,11 @@ export default function BroadcastPage() {
                     {campaignUsesAi(b) && (
                       <Badge variant="info" className="text-[9px]">
                         IA
+                      </Badge>
+                    )}
+                    {(b.textDeliveryMode ?? 'per_block') === 'merged' && (
+                      <Badge variant="muted" className="text-[9px]">
+                        Texto unificado
                       </Badge>
                     )}
                   </div>

@@ -24,6 +24,7 @@ export function useCreateBroadcast(sessionId: string) {
     mutationFn: (body: {
       name: string;
       blocks: CreateBroadcastBlock[];
+      textDeliveryMode?: 'per_block' | 'merged';
       deliveryChannel?: 'baileys_web' | 'cloud_api';
       recipientLimit?: number;
       filters?: Record<string, unknown>;
@@ -45,6 +46,7 @@ export function useUpdateBroadcast(sessionId: string) {
       body: {
         name: string;
         blocks: UpdateBroadcastBlock[];
+        textDeliveryMode?: 'per_block' | 'merged';
         deliveryChannel?: 'baileys_web' | 'cloud_api';
         recipientLimit?: number;
         filters?: Record<string, unknown>;

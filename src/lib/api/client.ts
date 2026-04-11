@@ -546,6 +546,7 @@ export function createBroadcast(
   body: {
     name: string;
     blocks: CreateBroadcastBlock[];
+    textDeliveryMode?: 'per_block' | 'merged';
     deliveryChannel?: 'baileys_web' | 'cloud_api';
     recipientLimit?: number;
     filters?: Record<string, unknown>;
@@ -579,6 +580,7 @@ export function createBroadcast(
     JSON.stringify({
       name: body.name,
       blocks: jsonBlocks,
+      textDeliveryMode: body.textDeliveryMode ?? 'per_block',
       deliveryChannel: body.deliveryChannel ?? 'baileys_web',
       recipientLimit: body.recipientLimit,
       filters: body.filters ?? {},
@@ -596,6 +598,7 @@ export function updateBroadcast(
   body: {
     name: string;
     blocks: UpdateBroadcastBlock[];
+    textDeliveryMode?: 'per_block' | 'merged';
     deliveryChannel?: 'baileys_web' | 'cloud_api';
     recipientLimit?: number;
     filters?: Record<string, unknown>;
@@ -638,6 +641,7 @@ export function updateBroadcast(
     JSON.stringify({
       name: body.name,
       blocks: jsonBlocks,
+      textDeliveryMode: body.textDeliveryMode ?? 'per_block',
       deliveryChannel: body.deliveryChannel ?? 'baileys_web',
       recipientLimit: body.recipientLimit,
       filters: body.filters ?? {},

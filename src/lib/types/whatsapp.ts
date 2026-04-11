@@ -130,10 +130,14 @@ export type UpdateBroadcastMediaUpload = CreateBroadcastMediaBlock & { keepExist
 
 export type UpdateBroadcastBlock = CreateBroadcastTextBlock | UpdateBroadcastMediaUpload | UpdateBroadcastMediaKeep;
 
+/** Envio de texto na campanha: um WhatsApp por bloco ou vários textos consecutivos em uma mensagem. */
+export type BroadcastTextDeliveryMode = 'per_block' | 'merged';
+
 export type BroadcastDto = {
   _id: string;
   sessionId: string;
   name: string;
+  textDeliveryMode?: BroadcastTextDeliveryMode;
   blocks: BroadcastBlockDto[];
   /** Campanhas antigas (Mongo sem `blocks`) — também refletido em `blocks` sintéticos. */
   baseMessage?: string;
